@@ -65,6 +65,42 @@ describe("AskClaude spawn confirmation", { concurrency: false }, () => {
 		assert.equal(__test.askClaudeResultKind({}), "success");
 	});
 
+	it("attributes the child query usage to the parent tool result", async () => {
+		const usage = {
+			input: 11,
+			output: 7,
+			cacheRead: 13,
+			cacheWrite: 5,
+			totalTokens: 36,
+			cost: { input: 0.1, output: 0.2, cacheRead: 0.03, cacheWrite: 0.04, total: 0.37 },
+		};
+		const result = await execute(
+			{},
+			context(async () => true),
+			async () => ({ responseText: "answer", stopReason: "stop", usage }),
+		);
+
+		assert.strictEqual(result.usage, usage);
+	});
+
+	it("retains usage when the child query fails after being billed", async () => {
+		const usage = {
+			input: 11,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 12,
+			cost: { input: 0.1, output: 0.01, cacheRead: 0, cacheWrite: 0, total: 0.11 },
+		};
+		const runner = async () => {
+			throw Object.assign(new Error("child failed"), { usage });
+		};
+		const result = await execute({}, context(async () => true), runner);
+
+		assert.equal(result.details.error, true);
+		assert.strictEqual(result.usage, usage);
+	});
+
 	it("does not prompt when the option is omitted/false and retains the existing execution path", async () => {
 		let confirms = 0;
 		const calls = [];

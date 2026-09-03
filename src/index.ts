@@ -1,4 +1,4 @@
-import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
+import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type Usage, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
 import { buildSessionContext, compact, generateBranchSummary, keyHint, type AgentToolResult, type AgentToolUpdateCallback, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
@@ -768,6 +768,7 @@ export const __test = {
 	CC_CHILD_ENV,
 	buildMcpServers,
 	branchSummaryOutcome,
+	sdkUsageToPi,
 	executeAskClaude,
 	buildAskClaudeConfirmationMessage,
 	askClaudeResultKind,
@@ -978,28 +979,45 @@ function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, 
 
 // --- Usage helpers ---
 
-function updateUsage(output: AssistantMessage, usage: Record<string, number | undefined>, model: Model<any>): void {
-	if (usage.input_tokens != null) output.usage.input = usage.input_tokens;
-	if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
-	if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
-	if (usage.cache_creation_input_tokens != null) output.usage.cacheWrite = usage.cache_creation_input_tokens;
+function emptyUsage(): Usage {
+	return {
+		input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+function applySdkUsage(output: Usage, usage: Record<string, number | undefined>, model?: Model<any>): void {
+	if (usage.input_tokens != null) output.input = usage.input_tokens;
+	if (usage.output_tokens != null) output.output = usage.output_tokens;
+	if (usage.cache_read_input_tokens != null) output.cacheRead = usage.cache_read_input_tokens;
+	if (usage.cache_creation_input_tokens != null) output.cacheWrite = usage.cache_creation_input_tokens;
 	// Anthropic reports the TTL breakdown separately. Keep the 1h portion so
 	// pi-ai can charge it at 2x base input rather than the 5m cache-write rate.
 	const cacheCreation = (usage as Record<string, unknown>).cache_creation;
 	if (cacheCreation === null) {
-		output.usage.cacheWrite1h = 0;
+		output.cacheWrite1h = 0;
 	} else if (cacheCreation && typeof cacheCreation === "object") {
 		const oneHour = (cacheCreation as { ephemeral_1h_input_tokens?: unknown }).ephemeral_1h_input_tokens;
-		output.usage.cacheWrite1h = typeof oneHour === "number" ? oneHour : 0;
+		output.cacheWrite1h = typeof oneHour === "number" ? oneHour : 0;
 	}
 	// Claude Code may report reasoning/thinking tokens separately, while pi's Usage type does not model that field.
 	const reasoning = usage.reasoning_tokens ?? usage.thinking_tokens;
-	if (reasoning != null) (output.usage as typeof output.usage & { reasoning?: number }).reasoning = reasoning;
-	output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-	calculateCost(model, output.usage);
+	if (reasoning != null) output.reasoning = reasoning;
+	output.totalTokens = output.input + output.output + output.cacheRead + output.cacheWrite;
+	if (model) calculateCost(model, output);
+}
+
+function sdkUsageToPi(usage: Record<string, number | undefined>, model?: Model<any>): Usage {
+	const output = emptyUsage();
+	applySdkUsage(output, usage, model);
+	return output;
+}
+
+function updateUsage(output: AssistantMessage, usage: Record<string, number | undefined>, model: Model<any>): void {
+	applySdkUsage(output.usage, usage, model);
 	const promptTokens = output.usage.input + output.usage.cacheRead + output.usage.cacheWrite;
 	const cachePct = promptTokens > 0 ? Math.round(output.usage.cacheRead / promptTokens * 100) : 0;
-	const reasoningText = reasoning != null ? ` reasoning=${reasoning}` : "";
+	const reasoningText = output.usage.reasoning != null ? ` reasoning=${output.usage.reasoning}` : "";
 	debug(`usage: in=${output.usage.input} out=${output.usage.output} cacheRead=${output.usage.cacheRead} cacheWrite=${output.usage.cacheWrite} total=${output.usage.totalTokens}${reasoningText} cachePct=${cachePct}% model=${model.id}`);
 }
 
@@ -1826,7 +1844,7 @@ async function promptAndWait(
 		context?: Context["messages"];
 		cwd?: string;
 	},
-): Promise<{ responseText: string; stopReason: string }> {
+): Promise<{ responseText: string; stopReason: string; usage?: Usage }> {
 	const cwd = options?.cwd ?? process.cwd();
 	const requestedModel = options?.model ?? "opus";
 	const model = resolveModel(requestedModel);
@@ -1927,6 +1945,7 @@ async function promptAndWait(
 	let sdkMessageCount = 0;
 	let textDeltaCount = 0;
 	let resultSubtype: string | undefined;
+	let finalUsage: Usage | undefined;
 
 	try {
 		for await (const message of sdkQuery) {
@@ -1969,14 +1988,19 @@ async function promptAndWait(
 					resultSubtype = message.subtype;
 					const r = message as any;
 					if (r.usage) {
-						debug(`askClaude: result usage: in=${r.usage.input_tokens} out=${r.usage.output_tokens} cacheRead=${r.usage.cache_read_input_tokens ?? 0} cacheWrite=${r.usage.cache_creation_input_tokens ?? 0} turns=${r.num_turns ?? "?"}`);
+						finalUsage = sdkUsageToPi(r.usage, model as Model<any> | undefined);
+						debug(`askClaude: result usage: in=${r.usage.input_tokens} out=${r.usage.output_tokens} cacheRead=${r.usage.cache_read_input_tokens ?? 0} cacheWrite=${r.usage.cache_creation_input_tokens ?? 0} cost=${finalUsage.cost.total} turns=${r.num_turns ?? "?"}`);
 					}
 					// Claude Code reports an API failure with `is_error` on a result whose
 					// subtype is still "success", so without this the error text was returned
 					// as Claude's answer and pi's model read a 429 as content. Throwing hands
 					// it to the tool's own catch, which renders it as an error result.
 					const failure = wasAborted ? undefined : resultErrorText(message);
-					if (failure) throw new Error(failure);
+					if (failure) {
+						const error = new Error(failure) as Error & { usage?: Usage };
+						error.usage = finalUsage;
+						throw error;
+					}
 					if (!responseText && message.subtype === "success" && message.result) {
 						responseText = message.result;
 					}
@@ -1990,7 +2014,7 @@ async function promptAndWait(
 			`stopReason=${stopReason} resultSubtype=${resultSubtype ?? "none"}`,
 			`sdkMessages=${sdkMessageCount} textDeltas=${textDeltaCount} responseLen=${responseText.length}`,
 			`toolCalls=${toolCalls.size}`);
-		return { responseText, stopReason };
+		return { responseText, stopReason, usage: finalUsage };
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
 		sdkQuery.close();
@@ -2198,6 +2222,9 @@ async function executeAskClaude(
 		return {
 			content: [{ type: "text", text }],
 			details: { prompt: params.prompt, executionTime, actions },
+			// Tool-result usage is persisted in the parent session and included in
+			// pi's session totals without pretending these tokens were main-context input.
+			usage: result.usage,
 		};
 	} catch (err) {
 		clearInterval(progressInterval);
@@ -2206,6 +2233,7 @@ async function executeAskClaude(
 		return {
 			content: [{ type: "text", text: `Error: ${msg}` }],
 			details: { prompt: params.prompt, executionTime: Date.now() - start, error: true },
+			usage: err && typeof err === "object" ? (err as { usage?: Usage }).usage : undefined,
 		};
 	}
 }

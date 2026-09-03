@@ -3,7 +3,7 @@
 ## UNRELEASED
 
 - **Add: optional AskClaude spawn confirmation** — `askClaude.confirmBeforeSpawn` requires approval before every Claude Code child starts, serializes only overlapping dialogs, warns clearly for `full` mode, and fails closed in headless contexts; the default remains disabled.
-- **Add: opt-in model cost estimates** — `provider.showCost` preserves pi-ai's model pricing so pi's usage footer can display an estimate; the default remains disabled.
+- **Add: opt-in model cost estimates** — `provider.showCost` preserves pi-ai's model pricing so pi's usage footer can display an estimate, including Claude usage from the AskClaude tool in the parent session total; the default remains disabled.
 - **Fix: account for 1-hour cache writes in cost estimates** — preserve Anthropic's TTL-specific cache creation count so pi-ai applies the 2× base-input rate instead of treating all cache writes as 5-minute writes.
 - **Fix: git-status changes no longer bust the prompt cache (issue #73)** — the `claude_code` preset embeds a git-status snapshot in the cached system block, so any git transition (new file, staging, commit) rewrote the whole conversation prefix at cache-write rates. The provider path now sets `includeGitInstructions: false`, stripping the block with no other cost.
 - **Fix: rate-limit warning showed 1% and repeated every request** — the SDK reports `utilization` as a fraction (0.98), but the notification rounded it directly, printing "1% used" at 98% of the window. It now shows true percentages and only re-notifies when usage rises past a new 5% step or the threshold changes, instead of once per request while over the threshold.
