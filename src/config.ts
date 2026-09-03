@@ -18,6 +18,7 @@ export interface Config {
 		description?: string;
 		defaultMode?: "full" | "read" | "none";
 		defaultIsolated?: boolean;
+		confirmBeforeSpawn?: boolean;
 		allowFullMode?: boolean;
 		appendSkills?: boolean;
 	};

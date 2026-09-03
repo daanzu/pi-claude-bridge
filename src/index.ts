@@ -1,7 +1,7 @@
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
-import { buildSessionContext, compact, generateBranchSummary, keyHint, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, compact, generateBranchSummary, keyHint, type AgentToolResult, type AgentToolUpdateCallback, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Type } from "typebox";
@@ -26,6 +26,7 @@ import {
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
+import { AsyncMutex } from "./async-mutex.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
 const _piAi = piAi as any;
@@ -767,6 +768,9 @@ export const __test = {
 	CC_CHILD_ENV,
 	buildMcpServers,
 	branchSummaryOutcome,
+	executeAskClaude,
+	buildAskClaudeConfirmationMessage,
+	askClaudeResultKind,
 };
 
 // --- Provider helpers: tool name mapping ---
@@ -1820,9 +1824,10 @@ async function promptAndWait(
 		thinking?: string;
 		isolated?: boolean;
 		context?: Context["messages"];
+		cwd?: string;
 	},
 ): Promise<{ responseText: string; stopReason: string }> {
-	const cwd = process.cwd();
+	const cwd = options?.cwd ?? process.cwd();
 	const requestedModel = options?.model ?? "opus";
 	const model = resolveModel(requestedModel);
 	const modelId = model?.id ?? requestedModel;
@@ -1999,6 +2004,211 @@ const DEFAULT_TOOL_DESCRIPTION = "Delegate to Claude Code for a second opinion o
 
 const PREVIEW_MAX_CHARS = 1000;
 const PREVIEW_MAX_LINES = 6;
+
+interface AskClaudeDetails {
+	prompt?: string;
+	executionTime?: number;
+	actions?: string;
+	error?: boolean;
+	cancelled?: boolean;
+}
+
+interface AskClaudeParams {
+	prompt: string;
+	mode?: "full" | "read" | "none";
+	model?: string;
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	isolated?: boolean;
+}
+
+interface AskClaudeExecutionSettings {
+	defaultMode: "full" | "read" | "none";
+	defaultIsolated: boolean;
+	appendSkills?: boolean;
+	confirmBeforeSpawn: boolean;
+}
+
+type AskClaudeRunner = typeof promptAndWait;
+
+// Symbol.for keeps dialogs serialized even when another extension instance is
+// loaded into the same process (for example by a subagent).
+const ASKCLAUDE_CONFIRMATION_QUEUE_KEY = Symbol.for("claude-bridge:askClaudeConfirmationQueue");
+const confirmationGlobal = globalThis as Record<symbol, unknown>;
+const askClaudeConfirmationQueue = (confirmationGlobal[ASKCLAUDE_CONFIRMATION_QUEUE_KEY] ??= new AsyncMutex()) as AsyncMutex;
+
+function promptPreview(prompt: string): { text: string; truncated: boolean } {
+	// Dialog text must not be able to inject terminal control sequences. Keep
+	// newlines and tabs, normalize CR, and replace the other C0 controls.
+	const safe = prompt
+		.replace(/\r\n?/g, "\n")
+		.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "�");
+	let text = safe.slice(0, PREVIEW_MAX_CHARS);
+	// Avoid ending the preview with half of a UTF-16 surrogate pair.
+	if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+	const lines = text.split("\n");
+	const truncated = safe.length > PREVIEW_MAX_CHARS || lines.length > PREVIEW_MAX_LINES;
+	return { text: lines.slice(0, PREVIEW_MAX_LINES).join("\n"), truncated };
+}
+
+function buildAskClaudeConfirmationMessage(input: {
+	prompt: string;
+	mode: "full" | "read" | "none";
+	model: string;
+	cliModel: string;
+	cwd: string;
+	isolated: boolean;
+}): string {
+	const preview = promptPreview(input.prompt);
+	const warning = input.mode === "full"
+		? "WARNING: full mode permits Claude Code to write files and run Bash commands without pi approval.\n\n"
+		: "";
+	const indentedPrompt = preview.text.split("\n").map((line) => `│ ${line}`).join("\n");
+	return warning
+		+ `Mode: ${input.mode}\n`
+		+ `Model: ${input.model}\n`
+		+ `Claude Code model: ${input.cliModel}\n`
+		+ `Working directory: ${input.cwd}\n`
+		+ `Isolated: ${input.isolated ? "yes" : "no"}\n\n`
+		+ "┌─ BEGIN PROMPT PREVIEW\n"
+		+ `${indentedPrompt}\n`
+		+ `└─ END PROMPT PREVIEW${preview.truncated ? " (truncated)" : ""}`;
+}
+
+async function requestAskClaudeConfirmation(
+	params: AskClaudeParams,
+	mode: "full" | "read" | "none",
+	isolated: boolean,
+	signal: AbortSignal | undefined,
+	ctx: ExtensionContext,
+	enabled: boolean,
+): Promise<string | undefined> {
+	if (!enabled) return undefined;
+	if (!ctx.hasUI) {
+		return "AskClaude was not started: confirmation is required, but no interactive UI is available.";
+	}
+	if (signal?.aborted) return "AskClaude was cancelled before Claude Code started.";
+
+	const requestedModel = params.model ?? "opus";
+	const resolvedModel = resolveModel(requestedModel);
+	const cliModel = resolvedModel
+		? claudeCodeModelId(resolvedModel, longContextSettings)
+		: requestedModel;
+	const message = buildAskClaudeConfirmationMessage({
+		prompt: params.prompt,
+		mode,
+		model: requestedModel,
+		cliModel,
+		cwd: ctx.cwd,
+		isolated,
+	});
+
+	try {
+		// The mutex covers the dialog only. Once confirm settles, its finally
+		// releases the next dialog before any Claude Code process is started.
+		const approved = await askClaudeConfirmationQueue.run(
+			() => ctx.ui.confirm("Run AskClaude?", message, { signal }),
+			signal,
+		);
+		if (!approved) return "AskClaude was cancelled; Claude Code was not started.";
+	} catch (err) {
+		if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+			return "AskClaude was cancelled before Claude Code started.";
+		}
+		return `AskClaude was not started because confirmation could not be completed: ${errorMessage(err)}`;
+	}
+	if (signal?.aborted) return "AskClaude was cancelled before Claude Code started.";
+	return undefined;
+}
+
+function cancelledAskClaudeResult(prompt: string, message: string): AgentToolResult<AskClaudeDetails> {
+	return {
+		content: [{ type: "text", text: message }],
+		details: { prompt, cancelled: true },
+	};
+}
+
+function askClaudeResultKind(details?: AskClaudeDetails): "cancelled" | "error" | "success" {
+	if (details?.cancelled) return "cancelled";
+	if (details?.error) return "error";
+	return "success";
+}
+
+async function executeAskClaude(
+	params: AskClaudeParams,
+	signal: AbortSignal | undefined,
+	onUpdate: AgentToolUpdateCallback<AskClaudeDetails> | undefined,
+	ctx: ExtensionContext,
+	settings: AskClaudeExecutionSettings,
+	runner: AskClaudeRunner = promptAndWait,
+): Promise<AgentToolResult<AskClaudeDetails>> {
+	// Guard: circular delegation
+	if (ctx.model?.baseUrl === "claude-bridge") {
+		debug("askClaude: blocked circular delegation (active provider is claude-bridge)");
+		return {
+			content: [{ type: "text", text: "Error: AskClaude cannot be used when the active provider is claude-bridge — you're already running through Claude Code." }],
+			details: { error: true },
+		};
+	}
+
+	const mode = params.mode ?? settings.defaultMode;
+	const isolated = params.isolated ?? settings.defaultIsolated;
+	const cancellation = await requestAskClaudeConfirmation(
+		params,
+		mode,
+		isolated,
+		signal,
+		ctx,
+		settings.confirmBeforeSpawn,
+	);
+	if (cancellation) return cancelledAskClaudeResult(params.prompt, cancellation);
+
+	// Confirmation has completed. Only now prepare progress reporting and allow
+	// the runner to create its SDK query / Claude Code child process.
+	const toolCalls = new Map<string, ToolCallState>();
+	const start = Date.now();
+	const progressInterval = setInterval(() => {
+		const elapsed = ((Date.now() - start) / 1000).toFixed(0);
+		const summary = buildActionSummary(toolCalls);
+		const status = summary ? `${elapsed}s — ${summary}` : `${elapsed}s — working...`;
+		onUpdate?.({
+			content: [{ type: "text", text: status }],
+			details: { prompt: params.prompt, executionTime: Date.now() - start },
+		});
+	}, 1000);
+
+	try {
+		const result = await runner(params.prompt, mode, toolCalls, signal, {
+			systemPrompt: ctx.getSystemPrompt(),
+			appendSkills: settings.appendSkills,
+			model: params.model,
+			thinking: params.thinking,
+			isolated,
+			context: isolated
+				? undefined
+				: buildSessionContext(ctx.sessionManager.getBranch()).messages as Context["messages"],
+			cwd: ctx.cwd,
+		});
+		clearInterval(progressInterval);
+		onUpdate?.({ content: [{ type: "text", text: "" }], details: {} });
+		const executionTime = Date.now() - start;
+		const actions = buildActionSummary(toolCalls);
+		const text = actions
+			? `${result.responseText}\n\n[Claude Code actions: ${actions}]`
+			: result.responseText;
+		return {
+			content: [{ type: "text", text }],
+			details: { prompt: params.prompt, executionTime, actions },
+		};
+	} catch (err) {
+		clearInterval(progressInterval);
+		debug(`askClaude error: mode=${mode}, model=${params.model ?? "default"}, isolated=${isolated}, elapsed=${((Date.now() - start) / 1000).toFixed(1)}s, error=`, err);
+		const msg = errorMessage(err);
+		return {
+			content: [{ type: "text", text: `Error: ${msg}` }],
+			details: { prompt: params.prompt, executionTime: Date.now() - start, error: true },
+		};
+	}
+}
 
 let askClaudeToolName = "AskClaude";
 
@@ -2189,7 +2399,7 @@ export default function (pi: ExtensionAPI) {
 			thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, { description: "Thinking effort level. Omit to use Claude Code's default." })),
 			isolated: Type.Optional(Type.Boolean({ description: "When true, Claude sees only this prompt (clean session). When false (default), Claude sees the full conversation history." })),
 		});
-		pi.registerTool<typeof askClaudeParams>({
+		pi.registerTool<typeof askClaudeParams, AskClaudeDetails>({
 			name: askConf?.name ?? "AskClaude",
 			label: askConf?.label ?? "Ask Claude Code",
 			description: askConf?.description ?? (allowFull ? DEFAULT_TOOL_DESCRIPTION_FULL : DEFAULT_TOOL_DESCRIPTION),
@@ -2215,12 +2425,15 @@ export default function (pi: ExtensionAPI) {
 					return new Text(theme.fg("mdLink", "◉ Claude Code ") + theme.fg("muted", status), 0, 0);
 				}
 
-				const details = result.details as { prompt?: string; executionTime?: number; actions?: string; error?: boolean } | undefined;
+				const details = result.details;
 				const body = result.content[0]?.type === "text" ? result.content[0].text : "";
 
-				let text = details?.error
-					? theme.fg("error", "✗ Claude Code error")
-					: theme.fg("mdLink", "✓ Claude Code");
+				const kind = askClaudeResultKind(details);
+				let text = kind === "cancelled"
+					? theme.fg("warning", "⚠ AskClaude cancelled")
+					: kind === "error"
+						? theme.fg("error", "✗ Claude Code error")
+						: theme.fg("mdLink", "✓ Claude Code");
 
 				if (details?.executionTime) text += ` ${theme.fg("dim", `${(details.executionTime / 1000).toFixed(1)}s`)}`;
 				if (details?.actions) text += ` ${theme.fg("muted", details.actions)}`;
@@ -2240,60 +2453,12 @@ export default function (pi: ExtensionAPI) {
 				return new Text(text, 0, 0);
 			},
 			async execute(_id, params, signal, onUpdate, ctx) {
-				// Guard: circular delegation
-				if (ctx.model?.baseUrl === "claude-bridge") {
-					debug("askClaude: blocked circular delegation (active provider is claude-bridge)");
-					return {
-						content: [{ type: "text" as const, text: "Error: AskClaude cannot be used when the active provider is claude-bridge — you're already running through Claude Code." }],
-						details: { error: true },
-					};
-				}
-
-				const mode = (params.mode ?? defaultMode) as "full" | "read" | "none";
-				const isolated = params.isolated ?? defaultIsolated;
-				const toolCalls = new Map<string, ToolCallState>();
-				const start = Date.now();
-
-				const progressInterval = setInterval(() => {
-					const elapsed = ((Date.now() - start) / 1000).toFixed(0);
-					const summary = buildActionSummary(toolCalls);
-					const status = summary ? `${elapsed}s — ${summary}` : `${elapsed}s — working...`;
-					onUpdate?.({
-						content: [{ type: "text", text: status }],
-						details: { prompt: params.prompt, executionTime: Date.now() - start },
-					});
-				}, 1000);
-
-				try {
-					const result = await promptAndWait(params.prompt, mode, toolCalls, signal, {
-						systemPrompt: ctx.getSystemPrompt(),
-						appendSkills: askConf?.appendSkills,
-						model: params.model,
-						thinking: params.thinking,
-						isolated,
-						context: isolated ? undefined : buildSessionContext(ctx.sessionManager.getBranch()).messages as Context["messages"],
-					});
-					clearInterval(progressInterval);
-					onUpdate?.({ content: [{ type: "text", text: "" }], details: {} });
-					const executionTime = Date.now() - start;
-					const actions = buildActionSummary(toolCalls);
-
-					const text = actions
-						? `${result.responseText}\n\n[Claude Code actions: ${actions}]`
-						: result.responseText;
-					return {
-						content: [{ type: "text" as const, text }],
-						details: { prompt: params.prompt, executionTime, actions },
-					};
-				} catch (err) {
-					clearInterval(progressInterval);
-					debug(`askClaude error: mode=${mode}, model=${params.model ?? "default"}, isolated=${isolated}, elapsed=${((Date.now() - start) / 1000).toFixed(1)}s, error=`, err);
-					const msg = errorMessage(err);
-					return {
-						content: [{ type: "text" as const, text: `Error: ${msg}` }],
-						details: { prompt: params.prompt, executionTime: Date.now() - start, error: true },
-					};
-				}
+				return executeAskClaude(params, signal, onUpdate, ctx, {
+					defaultMode,
+					defaultIsolated,
+					appendSkills: askConf?.appendSkills,
+					confirmBeforeSpawn: askConf?.confirmBeforeSpawn ?? false,
+				});
 			},
 		});
 	}

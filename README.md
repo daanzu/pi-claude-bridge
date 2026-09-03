@@ -59,6 +59,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
     "enabled": true,
     "allowFullMode": true,
     "defaultIsolated": false,
+    "confirmBeforeSpawn": false,
     "description": "Custom tool description override"
   },
   "provider": {
@@ -78,6 +79,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 - `description` — override the tool description. Default when `allowFullMode: true`: *"Delegate to Claude Code for a second opinion or analysis (code review, architecture questions, debugging theories), or to autonomously handle a task. Defaults to read-only mode — use full mode when the user wants to delegate a task that requires changes. Prefer to handle straightforward tasks yourself."*
 - `defaultMode` — `"read"` (default), `"none"`, or `"full"`
 - `defaultIsolated` — start each call in a fresh session (default `false`)
+- `confirmBeforeSpawn` — require interactive approval before every AskClaude call starts Claude Code (default `false`). Confirmation fails closed when no interactive UI is available; `full` mode dialogs warn that Claude can write files and run Bash commands.
 - `allowFullMode` — allow `mode: "full"`; set `false` to lock it out
 - `appendSkills` — forward pi's skills block into the system prompt (default `true`)
 
