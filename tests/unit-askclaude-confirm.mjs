@@ -65,6 +65,12 @@ describe("AskClaude spawn confirmation", { concurrency: false }, () => {
 		assert.equal(__test.askClaudeResultKind({}), "success");
 	});
 
+	it("formats a positive child cost for the user-only transcript display", () => {
+		assert.equal(__test.formatAskClaudeCost(1.234567), "$1.2346");
+		assert.equal(__test.formatAskClaudeCost(0), undefined);
+		assert.equal(__test.formatAskClaudeCost(undefined), undefined);
+	});
+
 	it("attributes the child query usage to the parent tool result", async () => {
 		const usage = {
 			input: 11,
@@ -81,6 +87,7 @@ describe("AskClaude spawn confirmation", { concurrency: false }, () => {
 		);
 
 		assert.strictEqual(result.usage, usage);
+		assert.equal(result.details.cost, usage.cost.total);
 	});
 
 	it("retains usage when the child query fails after being billed", async () => {
@@ -98,6 +105,7 @@ describe("AskClaude spawn confirmation", { concurrency: false }, () => {
 		const result = await execute({}, context(async () => true), runner);
 
 		assert.equal(result.details.error, true);
+		assert.equal(result.details.cost, usage.cost.total);
 		assert.strictEqual(result.usage, usage);
 	});
 

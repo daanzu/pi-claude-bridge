@@ -769,6 +769,7 @@ export const __test = {
 	buildMcpServers,
 	branchSummaryOutcome,
 	sdkUsageToPi,
+	formatAskClaudeCost,
 	executeAskClaude,
 	buildAskClaudeConfirmationMessage,
 	askClaudeResultKind,
@@ -1011,6 +1012,12 @@ function sdkUsageToPi(usage: Record<string, number | undefined>, model?: Model<a
 	const output = emptyUsage();
 	applySdkUsage(output, usage, model);
 	return output;
+}
+
+/** User-only display value for a completed AskClaude tool result. Keep this out
+ * of result.content: that content is sent back to the parent model. */
+function formatAskClaudeCost(cost?: number): string | undefined {
+	return typeof cost === "number" && cost > 0 ? `$${cost.toFixed(4)}` : undefined;
 }
 
 function updateUsage(output: AssistantMessage, usage: Record<string, number | undefined>, model: Model<any>): void {
@@ -2033,6 +2040,8 @@ interface AskClaudeDetails {
 	prompt?: string;
 	executionTime?: number;
 	actions?: string;
+	/** Estimated child-query cost for user-only rendering. Not put in content. */
+	cost?: number;
 	error?: boolean;
 	cancelled?: boolean;
 }
@@ -2221,7 +2230,7 @@ async function executeAskClaude(
 			: result.responseText;
 		return {
 			content: [{ type: "text", text }],
-			details: { prompt: params.prompt, executionTime, actions },
+			details: { prompt: params.prompt, executionTime, actions, cost: result.usage?.cost.total },
 			// Tool-result usage is persisted in the parent session and included in
 			// pi's session totals without pretending these tokens were main-context input.
 			usage: result.usage,
@@ -2230,10 +2239,11 @@ async function executeAskClaude(
 		clearInterval(progressInterval);
 		debug(`askClaude error: mode=${mode}, model=${params.model ?? "default"}, isolated=${isolated}, elapsed=${((Date.now() - start) / 1000).toFixed(1)}s, error=`, err);
 		const msg = errorMessage(err);
+		const usage = err && typeof err === "object" ? (err as { usage?: Usage }).usage : undefined;
 		return {
 			content: [{ type: "text", text: `Error: ${msg}` }],
-			details: { prompt: params.prompt, executionTime: Date.now() - start, error: true },
-			usage: err && typeof err === "object" ? (err as { usage?: Usage }).usage : undefined,
+			details: { prompt: params.prompt, executionTime: Date.now() - start, cost: usage?.cost.total, error: true },
+			usage,
 		};
 	}
 }
@@ -2465,6 +2475,8 @@ export default function (pi: ExtensionAPI) {
 
 				if (details?.executionTime) text += ` ${theme.fg("dim", `${(details.executionTime / 1000).toFixed(1)}s`)}`;
 				if (details?.actions) text += ` ${theme.fg("muted", details.actions)}`;
+				const cost = formatAskClaudeCost(details?.cost);
+				if (cost) text += ` ${theme.fg("dim", `cost ${cost}`)}`;
 
 				if (expanded) {
 					if (details?.prompt) text += `\n${theme.fg("dim", `Prompt: ${details.prompt}`)}`;
