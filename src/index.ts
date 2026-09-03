@@ -979,6 +979,15 @@ function updateUsage(output: AssistantMessage, usage: Record<string, number | un
 	if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
 	if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
 	if (usage.cache_creation_input_tokens != null) output.usage.cacheWrite = usage.cache_creation_input_tokens;
+	// Anthropic reports the TTL breakdown separately. Keep the 1h portion so
+	// pi-ai can charge it at 2x base input rather than the 5m cache-write rate.
+	const cacheCreation = (usage as Record<string, unknown>).cache_creation;
+	if (cacheCreation === null) {
+		output.usage.cacheWrite1h = 0;
+	} else if (cacheCreation && typeof cacheCreation === "object") {
+		const oneHour = (cacheCreation as { ephemeral_1h_input_tokens?: unknown }).ephemeral_1h_input_tokens;
+		output.usage.cacheWrite1h = typeof oneHour === "number" ? oneHour : 0;
+	}
 	// Claude Code may report reasoning/thinking tokens separately, while pi's Usage type does not model that field.
 	const reasoning = usage.reasoning_tokens ?? usage.thinking_tokens;
 	if (reasoning != null) (output.usage as typeof output.usage & { reasoning?: number }).reasoning = reasoning;

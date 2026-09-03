@@ -20,11 +20,11 @@ import { QueryContext } from "../src/query-state.js";
 const { __test } = await import("../src/index.js");
 
 // `cost` matters: a recorded stream carries real usage, so consumeQuery reaches
-// pi-ai's cost calculation, which the hand-built streams never exercise. Zeros are
-// what buildModels ships (src/models.ts) since Claude Code billing is per-plan.
+// pi-ai's cost calculation, which the hand-built streams never exercise. Use
+// pi-ai's Haiku rates here to verify the cache TTL accounting.
 const model = {
 	api: "anthropic-messages", provider: "anthropic", id: "claude-haiku-4-5",
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
 };
 
 function fixture(name) {
@@ -65,6 +65,14 @@ describe("replaying a recorded text-only turn", () => {
 		assert.ok(ctx.turnOutput.usage.output > 0, "output tokens");
 		assert.ok(ctx.turnOutput.usage.input + ctx.turnOutput.usage.cacheRead + ctx.turnOutput.usage.cacheWrite > 0, "prompt tokens");
 		assert.match(capturedSessionId ?? "", /^[0-9a-f-]{36}$/);
+	});
+
+	it("charges one-hour cache writes at twice the base input rate", async () => {
+		const { ctx } = await replay("text");
+
+		assert.equal(ctx.turnOutput.usage.cacheWrite1h, 9317);
+		assert.equal(ctx.turnOutput.usage.cost.cacheWrite, 0.018634);
+		assert.equal(ctx.turnOutput.usage.cost.total, 0.018879);
 	});
 });
 
