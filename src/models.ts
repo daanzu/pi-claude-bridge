@@ -7,18 +7,24 @@ export const MODEL_IDS_IN_ORDER = ["claude-fable-5", "claude-opus-5", "claude-op
 // Project pi-ai's model entries down to the fields pi's registerProvider expects,
 // and keep MODEL_IDS_IN_ORDER ordering. IDs missing from pi-ai are silently dropped.
 // Context-dependent display labels are applied after plan/long-context config is known.
-export function buildModels<T extends { id: string; [key: string]: any }>(piAiModels: T[]) {
+export type ModelBuildSettings = {
+	showCost?: boolean;
+};
+
+const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+export function buildModels<T extends { id: string; [key: string]: any }>(piAiModels: T[], settings: ModelBuildSettings = {}) {
 	return MODEL_IDS_IN_ORDER
 		.map((id) => piAiModels.find((m) => m.id === id))
 		.filter((m) => m != null)
 		// Forward thinkingLevelMap so pi-ai's per-model overrides (e.g. opus-4-8
 		// mapping xhigh→xhigh and max→max) are visible to the effort lookup.
-		.map(({ id, name, reasoning, input, contextWindow, maxTokens, thinkingLevelMap }) => ({
+		.map(({ id, name, reasoning, input, contextWindow, maxTokens, thinkingLevelMap, cost }) => ({
 			id,
 			name,
 			reasoning, input, contextWindow, maxTokens,
 			thinkingLevelMap,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			cost: settings.showCost ? { ...cost } : { ...ZERO_COST },
 		}));
 }
 

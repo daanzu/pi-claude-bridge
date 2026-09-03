@@ -14,7 +14,7 @@ const EXTRA = { plan: "pro", longContextExtraUsage: true };
 // Simulated pi-ai registry entry — extra fields mimic the ones pi-ai exposes
 // that must not leak into the provider-registered MODELS array.
 const mockPiAiModel = (id) => ({
-	id, name: id, reasoning: true, input: ["text"], cost: { input: 1, output: 1 },
+	id, name: id, reasoning: true, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0.1, cacheWrite: 1.25 },
 	contextWindow: 200000, maxTokens: 8000,
 	// Leaky fields that should be stripped by the projection:
 	baseUrl: "https://api.anthropic.com", api: "anthropic", provider: "anthropic",
@@ -47,11 +47,16 @@ describe("MODELS projection", () => {
 		assert.deepEqual(models.map((m) => m.id), ["claude-haiku-4-5"]);
 	});
 
-	it("zeros out cost regardless of pi-ai pricing", () => {
+	it("zeros out cost by default", () => {
 		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
 		for (const m of models) {
 			assert.deepEqual(m.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		}
+	});
+
+	it("preserves pi-ai pricing when enabled", () => {
+		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel), { showCost: true });
+		assert.deepEqual(find(models, "claude-opus-5")?.cost, { input: 1, output: 1, cacheRead: 0.1, cacheWrite: 1.25 });
 	});
 
 	it("leaves display names bare before plan-specific context is applied", () => {

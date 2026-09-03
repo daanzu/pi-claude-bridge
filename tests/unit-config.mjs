@@ -37,13 +37,13 @@ describe("loadConfig", () => {
 			const configDir = join(cwd, CONFIG_DIR_NAME);
 			mkdirSync(configDir, { recursive: true });
 			writeFileSync(join(configDir, "claude-bridge.json"), JSON.stringify({
-				provider: { plan: "max" },
+				provider: { plan: "max", showCost: true },
 				askClaude: { enabled: false },
 			}));
 
 			assert.deepEqual(loadConfig(cwd), {
 				startupNoticeShown: undefined,
-				provider: { plan: "max" },
+				provider: { plan: "max", showCost: true },
 				askClaude: { enabled: false },
 			});
 		} finally {

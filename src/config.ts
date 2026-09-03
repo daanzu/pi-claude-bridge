@@ -32,6 +32,8 @@ export interface Config {
 		// Anthropic billing). Enables Sonnet 4.6 [1m] on every plan and Opus 4.6
 		// [1m] on Pro.
 		longContextExtraUsage?: boolean;
+		// Preserve pi-ai's model pricing so pi can display a cost estimate.
+		showCost?: boolean;
 	};
 }
 
