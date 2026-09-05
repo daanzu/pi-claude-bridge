@@ -1,12 +1,15 @@
-// Status-line rendering helpers for the AskClaude tool.
+// TUI rendering helpers for the AskClaude tool.
 //
 // While Claude Code runs inside an AskClaude call, the pi TUI can't surface
 // each tool_use individually — there's only one status row for the whole
 // delegation. These helpers shape a tool_use record into a short, path-aware
 // label (e.g. "Read(src/foo.ts)", "Bash(git log --oneline…)") and collapse
-// runs of the same tool so the line doesn't flicker. Used only by
-// promptAndWait; the provider path exposes tools directly through pi's TUI
-// and doesn't need this.
+// runs of the same tool so the line doesn't flicker. Completed answers use
+// pi's native Markdown component so headings, lists, links, and code blocks
+// render the same way they do in normal assistant messages.
+
+import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Text } from "@earendil-works/pi-tui";
 
 export interface ToolCallState {
 	name: string;
@@ -87,4 +90,34 @@ export function buildActionSummary(calls: Map<string, ToolCallState>): string {
 		prevVerb = verb;
 	}
 	return parts.join("; ");
+}
+
+export interface AskClaudeResultView {
+	header: string;
+	body: string;
+	expanded: boolean;
+	prompt?: string;
+	truncated?: boolean;
+	expandHint?: string;
+}
+
+/** Build the completed AskClaude result while keeping metadata as plain text. */
+export function renderAskClaudeResultView(view: AskClaudeResultView, theme: Theme): Container {
+	const container = new Container();
+	container.addChild(new Text(view.header, 0, 0));
+
+	if (view.expanded && view.prompt) {
+		container.addChild(new Text(theme.fg("dim", `Prompt: ${view.prompt}`), 0, 0));
+		if (view.body) container.addChild(new Text(theme.fg("dim", "─".repeat(40)), 0, 0));
+	}
+
+	if (view.body) {
+		container.addChild(new Markdown(view.body, 0, 0, getMarkdownTheme()));
+	}
+
+	if (!view.expanded && view.truncated && view.expandHint) {
+		container.addChild(new Text(theme.fg("dim", `… (${view.expandHint})`), 0, 0));
+	}
+
+	return container;
 }

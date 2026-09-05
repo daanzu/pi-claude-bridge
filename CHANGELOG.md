@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- **Add: Markdown-rendered AskClaude responses** — completed sub-agent responses now use pi's native Markdown renderer in both collapsed previews and expanded output, including syntax-highlighted code blocks.
 - **Add: optional AskClaude spawn confirmation** — `askClaude.confirmBeforeSpawn` requires approval before every Claude Code child starts, serializes only overlapping dialogs, warns clearly for `full` mode, and fails closed in headless contexts; the default remains disabled.
 - **Add: opt-in model cost estimates** — `provider.showCost` preserves pi-ai's model pricing so pi's usage footer can display an estimate, including Claude usage from the AskClaude tool in the parent session total; completed AskClaude results also show the child cost in the user-only transcript rendering; the default remains disabled.
 - **Fix: account for 1-hour cache writes in cost estimates** — preserve Anthropic's TTL-specific cache creation count so pi-ai applies the 2× base-input rate instead of treating all cache writes as 5-minute writes.

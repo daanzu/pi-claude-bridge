@@ -25,7 +25,7 @@ import {
 } from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
-import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
+import { buildActionSummary, renderAskClaudeResultView, type ToolCallState } from "./askclaude-ui.js";
 import { AsyncMutex } from "./async-mutex.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
@@ -2467,30 +2467,28 @@ export default function (pi: ExtensionAPI) {
 				const body = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 				const kind = askClaudeResultKind(details);
-				let text = kind === "cancelled"
+				let header = kind === "cancelled"
 					? theme.fg("warning", "⚠ AskClaude cancelled")
 					: kind === "error"
 						? theme.fg("error", "✗ Claude Code error")
 						: theme.fg("mdLink", "✓ Claude Code");
 
-				if (details?.executionTime) text += ` ${theme.fg("dim", `${(details.executionTime / 1000).toFixed(1)}s`)}`;
-				if (details?.actions) text += ` ${theme.fg("muted", details.actions)}`;
+				if (details?.executionTime) header += ` ${theme.fg("dim", `${(details.executionTime / 1000).toFixed(1)}s`)}`;
+				if (details?.actions) header += ` ${theme.fg("muted", details.actions)}`;
 				const cost = formatAskClaudeCost(details?.cost);
-				if (cost) text += ` ${theme.fg("dim", `cost ${cost}`)}`;
+				if (cost) header += ` ${theme.fg("dim", `cost ${cost}`)}`;
 
-				if (expanded) {
-					if (details?.prompt) text += `\n${theme.fg("dim", `Prompt: ${details.prompt}`)}`;
-					if (details?.prompt && body) text += `\n${theme.fg("dim", "─".repeat(40))}`;
-					if (body) text += `\n${theme.fg("toolOutput", body)}`;
-				} else {
-					const truncated = body.length > PREVIEW_MAX_CHARS ? body.substring(0, PREVIEW_MAX_CHARS) : body;
-					const lines = truncated.split("\n").slice(0, PREVIEW_MAX_LINES);
-					if (lines.length) text += `\n${theme.fg("toolOutput", lines.join("\n"))}`;
-					if (body.length > PREVIEW_MAX_CHARS || body.split("\n").length > PREVIEW_MAX_LINES) text += `\n${theme.fg("dim", `… (${keyHint("app.tools.expand", "to expand")})`)}`;
-
-				}
-
-				return new Text(text, 0, 0);
+				const preview = body.length > PREVIEW_MAX_CHARS ? body.substring(0, PREVIEW_MAX_CHARS) : body;
+				const previewLines = preview.split("\n").slice(0, PREVIEW_MAX_LINES);
+				const truncated = body.length > PREVIEW_MAX_CHARS || body.split("\n").length > PREVIEW_MAX_LINES;
+				return renderAskClaudeResultView({
+					header,
+					body: expanded ? body : previewLines.join("\n"),
+					expanded,
+					prompt: details?.prompt,
+					truncated,
+					expandHint: keyHint("app.tools.expand", "to expand"),
+				}, theme);
 			},
 			async execute(_id, params, signal, onUpdate, ctx) {
 				return executeAskClaude(params, signal, onUpdate, ctx, {
